@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "app.py": {
+      "maxDuration": 60,
+      "includeFiles": "{web,config}/**"
+    }
+  }
+}

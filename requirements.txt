@@ -1,0 +1,14 @@
+# Mirrors pyproject.toml [project] dependencies for platforms that
+# install from requirements.txt (Vercel's Python runtime).
+# faster-whisper (the local ASR engine) is an optional extra and is
+# intentionally NOT here: it does not fit serverless limits; the cloud
+# ASR engine and the rule/LLM paths work without it.
+pydantic>=2
+fastapi
+uvicorn
+python-dotenv
+httpx
+APScheduler>=3.10
+pyyaml>=6
+psycopg[binary]>=3.1
+python-multipart
