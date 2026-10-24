@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meeting-agent"
+version = "0.1.0"
+description = "纪要 + 日程 + 任务 三 Agent 会议助手（CrewAI Flows 风格编排 + 规则 MVP + Mock fallback）"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "httpx",
+    "APScheduler>=3.10",
+    # Loads the Agent orchestration config (config/orchestration.yaml,
+    # src/shared/orchestration.py).
+    "pyyaml>=6",
+    "psycopg[binary]>=3.1",
+    # Required by FastAPI to parse the multipart upload of
+    # POST /meetings/{id}/audio.
+    "python-multipart",
+]
+
+[project.optional-dependencies]
+# Real LLM calls use httpx against any OpenAI-compatible endpoint;
+# litellm is NOT required (kept only as an optional fallback transport).
+llm = ["litellm"]
+# Real ASR (ASR_ENGINE=faster-whisper). Kept out of the main deps so the
+# default install stays light; the whisper model itself is downloaded
+# lazily on first transcription. pyannote.audio is intentionally NOT
+# here: speaker diarization is not integrated — ASR segments carry a
+# placeholder speaker and meeting.warnings says so (see transcriber.py).
+asr = ["faster-whisper"]
+flow = ["crewai"]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

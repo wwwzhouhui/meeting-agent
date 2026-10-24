@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会议助手 · 纪要 / 日程 / 任务 三 Agent 协同</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <h1>会议助手</h1>
+    <span class="subtitle">纪要 Agent · 日程 Agent · 任务 Agent —— 双确认闸门 + 事件总线</span>
+  </div>
+  <div id="tools-panel" class="tools">
+    <span class="tools-label">工具区</span>
+    <button id="btn-reminders" type="button">提醒扫描</button>
+    <button id="btn-gate-timeouts" type="button">闸门超时扫描</button>
+    <button id="btn-weekly" type="button">生成周报</button>
+    <button id="btn-refresh" type="button">刷新列表</button>
+  </div>
+</header>
+
+<div id="tool-output" class="tool-output hidden">
+  <div class="tool-output-head">
+    <strong id="tool-output-title">工具结果</strong>
+    <button id="tool-output-close" type="button">关闭</button>
+  </div>
+  <div id="tool-output-body"></div>
+</div>
+
+<main id="app">
+  <aside id="sidebar">
+    <section class="card">
+      <h2>会议列表</h2>
+      <ul id="meeting-list" class="meeting-list"></ul>
+      <p id="meeting-list-empty" class="muted">暂无会议，先在下方新建一场。</p>
+    </section>
+
+    <section class="card" id="create-panel">
+      <h2>新建会议</h2>
+      <label>会议 ID
+        <input id="f-id" type="text" placeholder="留空自动生成">
+      </label>
+      <label>标题
+        <input id="f-title" type="text" placeholder="如：支付联调与上线时间评审会">
+      </label>
+      <label>开始时间（可选）
+        <input id="f-start" type="datetime-local">
+      </label>
+      <label>参会人（每行一个：姓名，或 user_id,姓名，角色）
+        <textarea id="f-participants" rows="3" placeholder="张三&#10;李四&#10;王五"></textarea>
+      </label>
+      <label>逐字稿（每行一段：说话人：内容，可稍后在详情里再贴）
+        <textarea id="f-transcript" rows="5" placeholder="张三：今天主要对一下支付联调和上线时间。&#10;李四：支付渠道证书11月1日就过期了，这是个风险。"></textarea>
+      </label>
+      <div class="row">
+        <button id="btn-create" type="button" class="primary">创建会议</button>
+        <button id="btn-sample" type="button">载入示例（内置小样）</button>
+      </div>
+      <details>
+        <summary>以 JSON 导入完整会议</summary>
+        <textarea id="f-json" rows="5" placeholder='把 examples/sample_meeting.json 的内容粘贴到这里'></textarea>
+        <button id="btn-import-json" type="button">导入 JSON 会议</button>
+      </details>
+    </section>
+  </aside>
+
+  <section id="detail" class="detail">
+    <div id="detail-empty" class="card muted">从左侧选择一场会议，或新建一场。</div>
+    <div id="detail-body" class="hidden"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

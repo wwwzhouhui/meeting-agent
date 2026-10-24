@@ -1,0 +1,7 @@
+# ASR smoke transcript — jfk.flac
+# model=small device=cpu compute_type=int8 duration=11.0s transcribe=8.5s segments=2
+
+And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.
+
+[   0.00 ->    8.00] (发言人) And so my fellow Americans, ask not what your country can do for you.
+[   8.00 ->   11.00] (发言人) Ask what you can do for your country.

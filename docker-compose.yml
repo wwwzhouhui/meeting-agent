@@ -1,0 +1,40 @@
+services:
+  api:
+    build: .
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    # .env is optional (skeleton runs key-less); required:false keeps
+    # `docker compose up` working before `cp .env.example .env` is done.
+    env_file:
+      - path: .env
+        required: false
+    # Durable storage on the compose Postgres below (credentials match
+    # the postgres service definition). Remove this to run the API on
+    # the in-memory store instead.
+    environment:
+      DATABASE_URL: postgresql://meeting:meeting@postgres:5432/meeting_agent
+    depends_on:
+      - postgres
+      - redis
+    # NOTE: skeleton runs fine WITHOUT these services (in-memory DB + mock).
+    # They are here for Phase 1+ (Postgres persistence / Redis queue).
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: meeting_agent
+      POSTGRES_USER: meeting
+      POSTGRES_PASSWORD: meeting
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

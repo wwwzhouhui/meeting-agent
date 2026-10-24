@@ -1,0 +1,61 @@
+# Agent 编排配置 —— 管「结构开关」，不管凭据。
+#
+# 本文件决定：管线哪些步骤运行、两道确认闸门是否开启、后台作业
+# 有哪些与何时跑、默认用哪个 provider / 引擎。
+# 凭据与数值覆盖仍然走环境变量（.env），优先级（高 → 低）：
+#   环境变量 > 本文件 > 代码内置默认（与本文件当前内容一致）
+# 细则见 src/shared/orchestration.py 的模块文档与 README「编排配置」节。
+# 文件缺失时服务按内置默认启动（行为与无此文件前完全一致）；
+# 文件写坏（YAML 语法/类型错误）时启动会明确报错，不会静默忽略。
+
+pipeline:
+  steps:
+    # 会前 Brief 生成（CalendarAgent.prepare_brief；经
+    # MeetingFlow.prepare_brief 与 POST /meetings/{id}/brief 触发）。
+    # enabled: false 时不生成 brief，调用留 warning 痕迹。
+    brief:    { enabled: true }
+    # 录音转逐字稿（MinutesAgent 内的 Transcriber/ASR）。
+    # enabled: false 时跳过 ASR：无逐字稿的会议停在 needs_transcript。
+    transcribe: { enabled: true }
+    # 纪要生成（MinutesAgent）。enabled: false 时 /process 不生成纪要，
+    # 会议保持原状态并留 warning 痕迹。
+    minutes:  { enabled: true }
+    # 任务抽取与分派（TaskAgent）。enabled: false 时纪要确认后不再抽取
+    # 任务，会议停在 minutes_draft 并留 warning 痕迹。
+    tasks:    { enabled: true }
+    # 跟进会候选时间（CalendarAgent.propose）。
+    # enabled: false 时不产出候选时间，分发照常。
+    schedule: { enabled: true }
+    # 任务分发到外部系统（TaskAgent.dispatch_confirmed）。
+    # enabled: false 时任务确认后停在 tasks_confirmed，不外发，留痕。
+    dispatch: { enabled: true }
+
+gates:
+  # 两道人工确认闸门。enabled: false 不是「静默自动确认」：流转会
+  # 自动通过，但每次都在 meeting.warnings 与 events 里留痕注明是被
+  # 编排配置关闭的（minutes.confirmed 事件 payload via=config_gate_disabled）。
+  minutes: { enabled: true, timeout_hours: 48 }
+  tasks:   { enabled: true, timeout_hours: 48 }
+  # timeout_hours：闸门超时阈值，被闸门超时扫描使用；
+  # 环境变量 MINUTES_GATE_TIMEOUT_HOURS / TASKS_GATE_TIMEOUT_HOURS /
+  # GATE_TIMEOUT_HOURS（两者兜底）可覆盖。
+
+scheduler:
+  # 后台作业默认全关；手动端点（POST /reminders/run 等）不受影响。
+  # 对应环境变量 REMINDERS_ENABLED / GATE_TIMEOUTS_ENABLED /
+  # WEEKLY_SUMMARY_ENABLED 一旦设置即以环境变量为准。
+  reminders:     { enabled: false, interval_min: 30 }   # 到期/逾期提醒扫描
+  gate_timeouts: { enabled: false, interval_min: 60 }   # 闸门超时扫描
+  weekly_summary: { enabled: false, cron: "0 9 * * mon" }  # 每周一 09:00 任务周报
+
+providers:
+  # 与 src/tools/factory.py 的取值对齐；环境变量 CALENDAR_PROVIDER /
+  # TASK_PROVIDER / NOTIFY_PROVIDER 一旦设置即以环境变量为准。
+  calendar: mock   # mock | feishu | google | outlook
+  task: mock       # mock | feishu | linear | trello | jira
+  notify: mock     # mock | feishu | slack | email
+
+engines:
+  # 环境变量 ASR_ENGINE / LLM_MODE 一旦设置即以环境变量为准。
+  asr: mock        # mock | faster-whisper | volcano
+  llm_mode: auto   # auto | mock | llm

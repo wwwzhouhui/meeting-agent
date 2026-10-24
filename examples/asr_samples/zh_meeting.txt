@@ -1,0 +1,7 @@
+# ASR smoke transcript — zh_meeting.mp3
+# model=small device=cpu compute_type=int8 duration=9.4s transcribe=12.8s segments=2
+
+我们决定将上线时间推迟到11月8号,李四负责支付渠道证书续期。
+
+[   0.00 ->    4.86] (发言人) 我们决定将上线时间推迟到11月8号,
+[   4.86 ->    9.20] (发言人) 李四负责支付渠道证书续期。

@@ -1,0 +1,26 @@
+
+"""TODO(real): implement against Google Calendar API v3: POST https://www.googleapis.com/calendar/v3/calendars/{calendarId}/events ; GET .../freeBusy
+Unconfigured (no token) -> mock result + warning, never fake success."""
+from __future__ import annotations
+import logging
+from .base import BaseCalendarTool
+logger = logging.getLogger(__name__)
+class GoogleCalendarTool(BaseCalendarTool):
+    system = "google"
+    def __init__(self, token: str = "", calendar_id: str = "primary"):
+        self.token = token; self.calendar_id = calendar_id
+    def _mock(self, kind: str, **kw) -> dict:
+        logger.warning("GoogleCalendarTool not configured; mock %s %s", kind, kw)
+        return {"id": f"mock-google-{kind}-001", "mock": True, "system": self.system, **kw}
+    def list_events(self, start: str, end: str) -> list[dict]:
+        if not self.token: logger.warning("GoogleCalendarTool: no token, mock list_events"); return []
+        raise NotImplementedError("TODO: real API call - Google Calendar API v3: POST https://www.googleapis.com/calendar/v3/calendars/{calendarId}/events ; GET .../freeBusy")
+    def query_freebusy(self, attendees, start, end) -> dict:
+        if not self.token: return self._mock("freebusy", attendees=attendees, start=start, end=end)
+        raise NotImplementedError("TODO: real API call - Google Calendar API v3: POST https://www.googleapis.com/calendar/v3/calendars/{calendarId}/events ; GET .../freeBusy")
+    def create_event(self, title, start, attendees, description="", end=None) -> dict:
+        if not self.token: return self._mock("event", title=title, start=start, attendees=attendees)
+        raise NotImplementedError("TODO: real API call - Google Calendar API v3: POST https://www.googleapis.com/calendar/v3/calendars/{calendarId}/events ; GET .../freeBusy")
+    def update_event(self, event_id, **fields) -> dict:
+        if not self.token: return self._mock("event-update", id=event_id, **fields)
+        raise NotImplementedError("TODO: real API call - Google Calendar API v3: POST https://www.googleapis.com/calendar/v3/calendars/{calendarId}/events ; GET .../freeBusy")
