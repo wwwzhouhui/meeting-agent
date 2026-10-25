@@ -15,6 +15,7 @@ Covered:
   traversal-flavoured filename cannot escape the upload dir;
 - importing the transcriber module does not import faster_whisper.
 """
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -170,8 +171,17 @@ def test_faster_whisper_not_installed_reason(monkeypatch, tmp_path):
     assert 'pip install -e ".[asr]"' in tr.last_error
 
 
+def _stub_public_dns(monkeypatch):
+    """The SSRF guard resolves hostnames; stub it so the offline suite
+    never depends on real DNS (any hostname -> a public address)."""
+    def fake_getaddrinfo(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+
 # --------------------------------------------------------------- URL source
-def test_url_audio_downloaded_then_transcribed_and_temp_cleaned():
+def test_url_audio_downloaded_then_transcribed_and_temp_cleaned(monkeypatch):
+    _stub_public_dns(monkeypatch)
     payload = b"url-audio-bytes"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -188,7 +198,9 @@ def test_url_audio_downloaded_then_transcribed_and_temp_cleaned():
     assert not Path(engine.seen_paths[0]).exists()
 
 
-def test_url_download_http_error_reason():
+def test_url_download_http_error_reason(monkeypatch):
+    _stub_public_dns(monkeypatch)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, content=b"nope")
 

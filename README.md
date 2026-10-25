@@ -144,6 +144,29 @@ docker compose up   # api 默认连 compose 内的 postgres（持久化模式）
 # 没有 .env 也能起；要配 key 时再 cp .env.example .env
 ```
 
+## 访问认证（部署到共享网络前务必启用）
+
+默认与历史行为一致：**不启用任何认证**（本机 demo / 测试零配置）。
+但本服务能建会议、触发真实分发（飞书建任务/建日程），公开暴露前必须
+加访问控制，最简方式是内置的 HTTP Basic 认证：
+
+```bash
+# .env 里两项都填即启用（任一为空 = 关闭）：
+BASIC_AUTH_USERNAME=your-user
+BASIC_AUTH_PASSWORD=your-password
+```
+
+- 启用后**整个服务**（全部 API + 网页 UI）都要 Basic 认证，浏览器
+  原生弹窗即可登录，前端零改动；只有 `/health` 保持开放供探活。
+- `REQUIRE_AUTH=true` 时 fail-closed：凭据缺任一**拒绝启动**，杜绝
+  "忘了配凭据就暴露"的配置事故（推荐非本机部署一并设置）。
+- 凭据比较使用 `secrets.compare_digest`（防时序侧信道）；未启用时
+  启动日志会有醒目 warning 提醒。
+- 更彻底的做法是放反向代理后面做认证/限流，与本机制不冲突。
+- 另有 CSRF 防护（跨站状态变更请求拒绝 + `X-Frame-Options: DENY`）
+  与 SSRF 防护（服务端音频下载仅允许公网地址、逐跳校验重定向），
+  细节见 docs/security.md。
+
 ## 持久化（内存 / Postgres 两种模式）
 
 会议数据的存储由 `DATABASE_URL` 一个开关决定（`src/shared/db.py`
@@ -304,11 +327,16 @@ VOLCANO_ASR_ACCESS_TOKEN=...
 ```
 
 异步提交/查询协议：提交后拿任务 id 轮询（间隔
-`VOLCANO_ASR_POLL_INTERVAL_SEC` 默认 5 秒，总超时
-`VOLCANO_ASR_TIMEOUT_SEC` 默认 1800 秒）。**任务 id 在提交成功的
-那一刻就写入 `meeting.asr_task_id` 并落库**，进程中途挂掉也能凭 id
-续查，不会丢任务。状态码在响应头里，静音音频会以「音频中未检测到
-人声」落到 `needs_transcript` 的 warning，不会假装转写成功。
+`VOLCANO_ASR_POLL_INTERVAL_SEC` 默认 5 秒）。**单次请求最多同步等待
+`VOLCANO_ASR_SYNC_WAIT_SEC`（默认 60 秒，硬上限取
+min(SYNC_WAIT, VOLCANO_ASR_TIMEOUT_SEC)）**：超时仍未完成就诚实返回
+「仍在处理中」并落到 `needs_transcript` 的 warning，不再把请求线程
+挂住几十分钟。**任务 id 在提交成功的那一刻就写入
+`meeting.asr_task_id` 并落库**——再次执行 /process 会按该 id 续查
+（不重复提交），进程中途挂掉也能凭 id 续查，不会丢任务；重新上传
+录音会清掉旧任务 id 并删除旧文件。状态码在响应头里，静音音频会以
+「音频中未检测到人声」落到 `needs_transcript` 的 warning，不会假装
+转写成功。
 
 两条硬约束（实测换来的，客户端先拦，不等服务端报错）：
 

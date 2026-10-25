@@ -31,14 +31,16 @@ is attached to its transcripts.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
+import socket
 import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from src.shared.config import Settings, get_settings
 from src.shared.llm import _proxy_kwargs
@@ -48,6 +50,53 @@ logger = logging.getLogger(__name__)
 
 #: Speaker label for ASR-produced segments (no diarization, see module doc).
 ASR_SPEAKER_PLACEHOLDER = "发言人"
+
+#: Cap for downloading remote audio (Transcriber._download): a URL can
+#: point at an arbitrarily large file, which would fill the disk.
+MAX_AUDIO_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+
+#: Redirect hops the server-side audio fetch may follow. Each hop is
+#: validated against the SSRF guard BEFORE the request is sent.
+_MAX_AUDIO_REDIRECTS = 5
+
+#: SSRF guard messages — deliberately name NOTHING about the target
+#: (neither URL nor resolved address): the reason lands in
+#: meeting.warnings, readable by anyone with API access, and internal
+#: topology must not leak through it.
+_AUDIO_HOST_BLOCKED = (
+    "audio download blocked: the audio host is not a public address "
+    "(SSRF guard: loopback, private, link-local, reserved and multicast "
+    "targets are refused); host the recording on a public URL")
+_AUDIO_HOST_UNRESOLVED = (
+    "audio download blocked: the audio host could not be resolved "
+    "(failing closed rather than fetching an unverifiable target)")
+
+
+def _resolve_host_ips(hostname: str) -> list:
+    """Every IP address `hostname` may connect to (literal IPs pass
+    through unvalidated parsing; hostnames are resolved via getaddrinfo)."""
+    try:
+        return [ipaddress.ip_address(hostname)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except OSError as exc:
+            raise ASRError(_AUDIO_HOST_UNRESOLVED) from exc
+        return [ipaddress.ip_address(info[4][0]) for info in infos]
+
+
+def _assert_public_http_host(url: str) -> None:
+    """SSRF guard for the server-side audio fetch: refuse loopback,
+    private, link-local, reserved, multicast and unspecified targets —
+    including every redirect hop (validated before each request)."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ASRError(_AUDIO_HOST_BLOCKED)
+    for ip in _resolve_host_ips(hostname):
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise ASRError(_AUDIO_HOST_BLOCKED)
 
 _DIARIZATION_NOTE = (
     "ASR transcript has no speaker diarization (pyannote not integrated): "
@@ -167,12 +216,19 @@ _VOLCANO_LOCAL_GUIDANCE = (
 
 class VolcanoASREngine:
     """Volcano Doubao cloud ASR. Async: submit once, then poll query
-    with the same X-Api-Request-Id until success / failure / timeout.
+    with the same X-Api-Request-Id — but only for a BOUNDED sync wait
+    per call (VOLCANO_ASR_SYNC_WAIT_SEC, default 60s; hard ceiling
+    min(sync_wait, VOLCANO_ASR_TIMEOUT_SEC)). Still pending past that,
+    the call returns [] with a "still processing" reason while the task
+    id stays persisted on the meeting: re-running /process resumes
+    polling by that id (transcribe_url(resume_task_id=...)), so a long
+    recording never parks a request thread and a crashed process loses
+    nothing.
 
     The request id is reported via ``on_task_submitted`` (and kept on
     ``last_task_id``) IMMEDIATELY after a successful submit, before any
     polling — Transcriber/MinutesAgent persist it on the meeting at
-    that moment, so a process dying mid-poll does not lose the task.
+    that moment.
 
     ``note`` stays None on success: this engine returns speaker info,
     so the faster-whisper no-diarization caveat does not apply. It is
@@ -293,15 +349,22 @@ class VolcanoASREngine:
         — with the guidance a human needs, never a silent no-op."""
         raise ASRError(f"{_VOLCANO_LOCAL_GUIDANCE}; got local path: {audio_path}")
 
-    def transcribe_url(self, audio_url: str) -> list[TranscriptSegment]:
+    def transcribe_url(self, audio_url: str,
+                       *, resume_task_id: str | None = None) -> list[TranscriptSegment]:
         self._check_credentials()
         parsed = urlparse(audio_url)
         if parsed.scheme not in ("http", "https"):
             raise ASRError(f"{_VOLCANO_LOCAL_GUIDANCE}; got: {audio_url}")
-        audio_format = self._format_for(audio_url, parsed)
-        request_id = str(uuid.uuid4())
         http, close = self._new_client()
         try:
+            if resume_task_id:
+                # Resume an already-submitted task by its persisted id:
+                # query only, never re-submit — resubmitting would create
+                # a duplicate cloud task for the same audio.
+                self.last_task_id = resume_task_id
+                return self._poll(http, resume_task_id)
+            audio_format = self._format_for(audio_url, parsed)
+            request_id = str(uuid.uuid4())
             submit = self._post(http, _VOLCANO_SUBMIT_PATH, request_id, {
                 "audio": {"url": audio_url, "format": audio_format},
                 "request": {
@@ -335,10 +398,27 @@ class VolcanoASREngine:
             f"X-Api-Status-Code 20000003, task {request_id}); "
             "no transcript could be produced from this recording")
 
+    def _sync_wait_seconds(self) -> float:
+        """Per-call synchronous polling budget: min(sync wait, hard
+        timeout). Both clamped >= 0; a 0 budget means "submit/query
+        once and report pending immediately"."""
+        s = self.settings
+        wait = max(0.0, float(s.volcano_asr_sync_wait_sec))
+        timeout = max(0.0, float(s.volcano_asr_timeout_sec))
+        return min(wait, timeout)
+
+    def _pending_reason(self, request_id: str, waited: float) -> str:
+        return (
+            f"云端转写任务仍在处理中（本次请求已等待 {waited:g}s，不再阻塞）："
+            f"任务 ID {request_id} 已保存在会议记录上，再次执行 /process 会按该 ID 继续查询；"
+            "若长期一直 pending，请检查音频 URL 是否公网可访问 "
+            f"(volcano ASR task {request_id} still processing after {waited:g}s; "
+            "re-run /process to keep polling by the persisted task id)")
+
     def _poll(self, http, request_id: str) -> list[TranscriptSegment]:
-        timeout = max(0.0, float(self.settings.volcano_asr_timeout_sec))
         interval = max(0.0, float(self.settings.volcano_asr_poll_interval_sec))
-        deadline = time.monotonic() + timeout
+        budget = self._sync_wait_seconds()
+        deadline = time.monotonic() + budget
         while True:
             resp = self._post(http, _VOLCANO_QUERY_PATH, request_id, {})
             code, _msg = self._status_of(resp)
@@ -349,12 +429,12 @@ class VolcanoASREngine:
                 return []
             if code in _VOLCANO_STATUS_PENDING:
                 if time.monotonic() >= deadline:
-                    raise ASRError(
-                        f"volcano ASR task {request_id} timed out after "
-                        f"{timeout:g}s of polling (last status {code}); "
-                        "raise VOLCANO_ASR_TIMEOUT_SEC for very long "
-                        "recordings, and check the audio URL is reachable "
-                        "from the public internet")
+                    # Still processing past the sync budget: hand back
+                    # honestly instead of parking the request thread.
+                    # The task id is already persisted on the meeting;
+                    # the next /process resumes polling by it.
+                    self.empty_reason = self._pending_reason(request_id, budget)
+                    return []
                 time.sleep(interval)
                 continue
             self._raise_for_status(resp, "query", request_id)
@@ -490,7 +570,7 @@ class Transcriber:
             close = False
         else:
             kwargs: dict[str, Any] = {
-                "timeout": 120.0, "trust_env": False, "follow_redirects": True}
+                "timeout": 120.0, "trust_env": False, "follow_redirects": False}
             if self._transport is not None:
                 # Injected transport (tests/fakes) IS the network; adding
                 # a proxy would make httpx bypass it entirely (see llm.py).
@@ -500,18 +580,45 @@ class Transcriber:
             http = httpx.Client(**kwargs)
             close = True
         try:
-            with http.stream("GET", url) as resp:
-                if resp.status_code >= 400:
-                    raise ASRError(f"audio download failed: HTTP {resp.status_code} for {url}")
-                with open(tmp_path, "wb") as fh:
-                    for chunk in resp.iter_bytes():
-                        fh.write(chunk)
+            # Manual redirect loop: every hop passes the SSRF guard BEFORE
+            # a request is sent (follow_redirects would fetch unvalidated
+            # targets), and the hops are bounded.
+            current: str | None = url
+            hops = 0
+            while current is not None:
+                _assert_public_http_host(current)
+                if hops > _MAX_AUDIO_REDIRECTS:
+                    raise ASRError(
+                        f"audio download failed: more than "
+                        f"{_MAX_AUDIO_REDIRECTS} redirects")
+                hops += 1
+                with http.stream("GET", current, follow_redirects=False) as resp:
+                    if resp.is_redirect:
+                        current = urljoin(current, resp.headers.get("location") or "")
+                        continue
+                    current = None
+                    if resp.status_code >= 400:
+                        # Deliberately NO URL echo: last_error lands in
+                        # meeting.warnings and must not leak the target.
+                        raise ASRError(f"audio download failed: HTTP {resp.status_code}")
+                    total = 0
+                    with open(tmp_path, "wb") as fh:
+                        for chunk in resp.iter_bytes():
+                            total += len(chunk)
+                            if total > MAX_AUDIO_DOWNLOAD_BYTES:
+                                raise ASRError(
+                                    f"audio download exceeds the "
+                                    f"{MAX_AUDIO_DOWNLOAD_BYTES // (1024 * 1024)} MB "
+                                    "limit; compress/convert the recording or host a "
+                                    "smaller file")
+                            fh.write(chunk)
         except ASRError:
             Path(tmp_path).unlink(missing_ok=True)
             raise
         except Exception as exc:
             Path(tmp_path).unlink(missing_ok=True)
-            raise ASRError(f"audio download failed for {url}: {exc}") from exc
+            # no URL echo here either (transport errors can embed the host)
+            raise ASRError(f"audio download failed: {type(exc).__name__}: {exc}") from exc
         finally:
             if close:
                 http.close()
@@ -519,7 +626,12 @@ class Transcriber:
 
     # -- main entry -----------------------------------------------------------
     def transcribe(self, audio_url: str | None = None,
-                   segments: list[TranscriptSegment] | None = None) -> list[TranscriptSegment]:
+                   segments: list[TranscriptSegment] | None = None,
+                   resume_task_id: str | None = None) -> list[TranscriptSegment]:
+        """Transcribe `audio_url`. `resume_task_id` (cloud engines with a
+        task id already persisted on the meeting, e.g. volcano) resumes
+        polling that task instead of submitting a duplicate one; other
+        engines ignore it."""
         if segments:
             return segments
         self.last_error = None
@@ -548,7 +660,8 @@ class Transcriber:
             # local file — and a local path is refused by the engine
             # with guidance, never submitted.
             try:
-                result = engine.transcribe_url(audio_url)  # type: ignore[attr-defined]
+                result = engine.transcribe_url(
+                    audio_url, resume_task_id=resume_task_id)  # type: ignore[attr-defined]
             except Exception as exc:
                 self.last_error = f"ASR transcription failed: {exc}"
                 logger.warning("ASR failed for %s: %s", audio_url, exc)

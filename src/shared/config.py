@@ -127,6 +127,18 @@ class Settings:
         default_factory=lambda: os.getenv("VOLCANO_ASR_RESOURCE", "volc.seedasr.auc"))
     volcano_asr_poll_interval_sec: float = field(
         default_factory=lambda: _float_env("VOLCANO_ASR_POLL_INTERVAL_SEC", 5.0))
+    # How long ONE transcribe() call may wait synchronously while the
+    # cloud task is still pending (60s default). Past this the call
+    # returns [] with a "still processing" reason and the task id kept
+    # on the meeting — re-running /process resumes polling by that id.
+    # This is what keeps a long recording from parking a request thread
+    # for up to the old 30-minute timeout.
+    volcano_asr_sync_wait_sec: float = field(
+        default_factory=lambda: _float_env("VOLCANO_ASR_SYNC_WAIT_SEC", 60.0))
+    # Hard ceiling on a single call's wait: the effective per-call
+    # budget is min(volcano_asr_sync_wait_sec, volcano_asr_timeout_sec).
+    # (Historically this was the total poll timeout; with the bounded
+    # sync wait it only bites when configured BELOW the sync wait.)
     volcano_asr_timeout_sec: float = field(
         default_factory=lambda: _float_env("VOLCANO_ASR_TIMEOUT_SEC", 1800.0))
     calendar_provider: str = field(
@@ -211,6 +223,15 @@ class Settings:
     # PostgresDB (durable); empty -> InMemoryDB (default; data lost on
     # restart). Any other scheme is an error, never a silent fallback.
     database_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", ""))
+    # HTTP Basic auth for the whole API + web UI (src/api/main.py
+    # middleware). BOTH must be non-empty to enable; either empty ->
+    # disabled, exactly the historical open behaviour (demo/tests).
+    basic_auth_username: str = field(default_factory=lambda: os.getenv("BASIC_AUTH_USERNAME", ""))
+    basic_auth_password: str = field(default_factory=lambda: os.getenv("BASIC_AUTH_PASSWORD", ""))
+    # Fail-closed guard: when true, startup ABORTS unless both BASIC_AUTH
+    # credentials are configured — for deployments that must never run
+    # (not even briefly, by config mistake) with auth disabled.
+    require_auth: bool = field(default_factory=lambda: _bool_env("REQUIRE_AUTH", False))
     # RESERVED (Phase 1+ queue); present in .env.example, kept for parity.
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", ""))
 

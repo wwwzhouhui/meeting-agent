@@ -21,7 +21,10 @@ Red lines executed here (mirroring the minutes analyst):
   outside P0/P1/P2 falls back to the rule priority for that text.
 - id / idempotency_key are generated exactly like the rule path
   (task-{meeting.id}-{first segment id} / {meeting.id}:{first id}),
-  so switching paths never double-creates tasks downstream.
+  so switching paths never double-creates tasks downstream; when two
+  different items cite the same first segment a run-scoped "-2"/"-3"
+  suffix disambiguates (a shared id once made dispatch silently reuse
+  the first item's external task for the second).
 - Meeting-arrangement items ("召开跟进会…") belong to the Calendar
   Agent, not the task list: a deterministic safety net
   (filter_scheduling_items) drops them on EVERY path (LLM, repaired,
@@ -214,6 +217,7 @@ class ActionItemExtractor:
         base = meeting.base_date()
         seg_text = {s.id: s.text for s in meeting.transcript}
         items: list[ActionItem] = []
+        used_ids: set[str] = set()
         for raw in raw_items:
             if not isinstance(raw, dict):
                 continue
@@ -246,15 +250,28 @@ class ActionItemExtractor:
                 context = title + " " + " ".join(seg_text.get(i, "") for i in ids)
                 priority = self._priority(context)
             first = ids[0]
+            # Two different tasks may cite the same FIRST segment; a bare
+            # meeting+segment id would collide — same id AND same
+            # idempotency key made dispatch silently reuse the first
+            # task's result for the second one — so a run-scoped -2/-3
+            # suffix disambiguates while the first item keeps the stable
+            # rule-path shape (switching paths never double-creates).
+            item_id = f"task-{meeting.id}-{first}"
+            occurrence = 1
+            while item_id in used_ids:
+                occurrence += 1
+                item_id = f"task-{meeting.id}-{first}-{occurrence}"
+            used_ids.add(item_id)
             item = ActionItem(
                 # NOTE: raw.get("owner_id") is deliberately never read —
                 # the Assigner is the only owner-resolution authority.
-                id=f"task-{meeting.id}-{first}",
+                id=item_id,
                 title=title[:60], owner_raw=owner_raw, owner_confidence=0.0,
                 due_date=due_date, due_raw=due_raw,
                 priority=priority,
                 source_segment_ids=ids,
-                idempotency_key=f"{meeting.id}:{first}",
+                idempotency_key=(f"{meeting.id}:{first}" if occurrence == 1
+                                 else f"{meeting.id}:{first}:{occurrence}"),
             )
             if self._merge_if_duplicate(item, items):
                 continue

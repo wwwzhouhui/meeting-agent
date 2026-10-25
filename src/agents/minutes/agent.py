@@ -65,7 +65,11 @@ class MinutesAgent:
             if hasattr(self.transcriber, "on_task_submitted"):
                 self.transcriber.on_task_submitted = (
                     lambda task_id, m=meeting: self._persist_asr_task_id(m, task_id))
-            meeting.transcript = self.transcriber.transcribe(meeting.audio_url)
+            # resume_task_id: a cloud-ASR task id persisted on a previous
+            # run (still processing / crashed process) is polled again
+            # instead of submitting a duplicate cloud task.
+            meeting.transcript = self.transcriber.transcribe(
+                meeting.audio_url, resume_task_id=meeting.asr_task_id)
             task_id = getattr(self.transcriber, "last_task_id", None)
             if task_id:
                 meeting.asr_task_id = task_id

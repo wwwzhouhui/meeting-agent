@@ -236,12 +236,16 @@ def test_submit_error_code_and_message_surface():
     assert any("45000001" in w for w in m.warnings)
 
 
-def test_polling_timeout_is_an_actionable_error():
+def test_pending_past_sync_budget_returns_honestly_not_a_hang_or_error():
+    # Budget 0 (min(sync_wait, timeout)=0): the first pending query
+    # immediately returns [] with the "still processing" reason — the
+    # request thread is never parked, and the task id stays kept for
+    # the resume-by-id re-run (see test_high_priority_fixes.py).
     fake = VolcanoFake(query_codes=("20000001",))  # never finishes
     engine = _engine(fake, volcano_asr_timeout_sec=0.0)
-    with pytest.raises(ASRError) as excinfo:
-        engine.transcribe_url(AUDIO_URL)
-    assert "timed out" in str(excinfo.value)
+    assert engine.transcribe_url(AUDIO_URL) == []
+    assert engine.empty_reason and "仍在处理中" in engine.empty_reason
+    assert engine.last_task_id  # kept on the engine for resume
 
 
 # ---------------------------------------------------------------- credentials

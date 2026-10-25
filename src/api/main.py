@@ -36,16 +36,19 @@ Endpoints:
 """
 from __future__ import annotations
 
+import base64
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -260,6 +263,17 @@ async def lifespan(app: FastAPI):
     """
     scheduler = None
     settings = get_settings()
+    if settings.require_auth and not (settings.basic_auth_username and settings.basic_auth_password):
+        raise RuntimeError(
+            "REQUIRE_AUTH=true but BASIC_AUTH_USERNAME/BASIC_AUTH_PASSWORD are not "
+            "both set: refusing to start with auth disabled (fail-closed)")
+    if settings.basic_auth_username and settings.basic_auth_password:
+        logger.info("API auth enabled: HTTP Basic (BASIC_AUTH_USERNAME/BASIC_AUTH_PASSWORD)")
+    else:
+        logger.warning(
+            "API auth is DISABLED (BASIC_AUTH_USERNAME/BASIC_AUTH_PASSWORD unset) — "
+            "anyone who can reach this service can create meetings and dispatch "
+            "tasks to configured providers; set both env vars to enable HTTP Basic auth")
     app.state.orchestration = _orchestration
     try:
         scheduler = build_scheduler(settings, _orchestration)
@@ -281,6 +295,70 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Meeting Agent", version="0.1.0", lifespan=lifespan)
 app.include_router(webhook_router)
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request: Request, call_next):
+    """Optional whole-app HTTP Basic auth: enabled when BOTH
+    BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD are set, disabled
+    (historical open behaviour) when either is empty. Covers every
+    route including the static web UI; only /health stays open for
+    load-balancer probes and reveals nothing. Browser-native Basic
+    auth covers the page AND same-origin fetch automatically, so the
+    zero-build frontend needs no changes. Credentials are compared
+    with secrets.compare_digest (timing-safe)."""
+    settings = get_settings()
+    user, password = settings.basic_auth_username, settings.basic_auth_password
+    if user and password and request.url.path != "/health":
+        supplied = request.headers.get("authorization", "")
+        ok = False
+        if supplied.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(supplied[6:].strip()).decode("utf-8")
+                got_user, _, got_password = decoded.partition(":")
+                ok = (secrets.compare_digest(got_user, user)
+                      and secrets.compare_digest(got_password, password))
+            except Exception:
+                ok = False
+        if not ok:
+            return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def csrf_and_frame_guard(request: Request, call_next):
+    """Two browser-facing guards (both no-ops for server-to-server
+    clients like curl, scripts and provider webhooks):
+
+    - CSRF: state-changing methods are rejected when they carry a
+      cross-site context — an Origin that does not match the (forwarded)
+      host, or Sec-Fetch-Site: cross-site. Browser ambient credentials
+      (cached HTTP Basic) ride along on cross-site form posts, which
+      would otherwise drive the body-less confirm endpoints from a
+      third-party page. Requests WITHOUT these headers pass — CSRF
+      needs a browser, and same-origin browser requests match on Origin.
+    - Framing: every response carries X-Frame-Options: DENY and CSP
+      frame-ancestors 'none' so the UI cannot be framed (clickjacking).
+    """
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = request.headers.get("origin")
+        if origin is not None:
+            host = (request.headers.get("x-forwarded-host")
+                    or request.headers.get("host") or "")
+            try:
+                origin_host = urlparse(origin).netloc
+            except Exception:
+                origin_host = ""
+            if origin_host != host:
+                return JSONResponse(status_code=403, content={
+                    "detail": "cross-origin state-changing request rejected"})
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse(status_code=403, content={
+                "detail": "cross-site state-changing request rejected"})
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
 
 
 class TranscriptIn(BaseModel):
@@ -362,6 +440,11 @@ def set_transcript(meeting_id: str, body: TranscriptIn):
 # is never used as a path (path-traversal safe).
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm", ".mp4"}
 
+# Cap for one audio upload. The request body is streamed to disk in
+# chunks and refused the moment it exceeds this, so an oversized upload
+# can neither sit fully in memory nor fill the disk.
+MAX_AUDIO_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 @app.post("/meetings/{meeting_id}/audio")
 async def upload_audio(meeting_id: str, file: UploadFile = File(...)):
@@ -373,19 +456,41 @@ async def upload_audio(meeting_id: str, file: UploadFile = File(...)):
         raise HTTPException(
             422, f"unsupported audio extension {ext or '(none)'!r}; "
                  f"allowed: {sorted(ALLOWED_AUDIO_EXTENSIONS)}")
-    data = await file.read()
-    if not data:
-        raise HTTPException(422, "empty audio file")
     upload_dir = Path(get_settings().asr_upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     dest = upload_dir / f"{meeting_id}{ext}"
-    dest.write_bytes(data)
+    size = 0
+    try:
+        with dest.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_AUDIO_UPLOAD_BYTES:
+                    raise HTTPException(
+                        413, f"audio file exceeds the "
+                             f"{MAX_AUDIO_UPLOAD_BYTES // (1024 * 1024)} MB upload limit")
+                fh.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)  # never leave a partial file behind
+        raise
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(422, "empty audio file")
+    # Replacing the recording: drop the previous file (possibly stored
+    # under a different extension) and invalidate any cloud-ASR task id
+    # earned by the OLD audio — a new recording must never resume it.
+    for old in upload_dir.glob(f"{meeting_id}.*"):
+        if old.is_file() and old != dest:
+            old.unlink()
     m.audio_url = str(dest)
+    m.asr_task_id = None
     if m.status == "needs_transcript":
         m.status = "scheduled"  # audio arrived; /process can retry with ASR
     store.save(m)
     return {"meeting_id": meeting_id, "filename": dest.name,
-            "size_bytes": len(data), "audio_url": m.audio_url}
+            "size_bytes": size, "audio_url": m.audio_url}
 
 
 @app.post("/meetings/{meeting_id}/process")

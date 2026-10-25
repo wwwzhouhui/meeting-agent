@@ -6,6 +6,9 @@ services:
       - "8000:8000"
     # .env is optional (skeleton runs key-less); required:false keeps
     # `docker compose up` working before `cp .env.example .env` is done.
+    # SECURITY: before exposing this service beyond localhost, set
+    # BASIC_AUTH_USERNAME / BASIC_AUTH_PASSWORD in .env (see docs/security.md);
+    # REQUIRE_AUTH=true additionally makes the API refuse to start without them.
     env_file:
       - path: .env
         required: false
@@ -26,15 +29,15 @@ services:
       POSTGRES_DB: meeting_agent
       POSTGRES_USER: meeting
       POSTGRES_PASSWORD: meeting
-    ports:
-      - "5432:5432"
+    # Intentionally NOT published to the host: default-credential service,
+    # reachable only inside the compose network. For local debugging bind
+    # to loopback explicitly instead, e.g. ports: ["127.0.0.1:5432:5432"].
     volumes:
       - pgdata:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # Same as postgres: no host publication (debug bind: 127.0.0.1:6379:6379).
 
 volumes:
   pgdata:
